@@ -27,6 +27,7 @@ contract MerkleDistributor is IMerkleDistributor, Ownable {
     // @dev Only owner can set new Merkle root
     function setMerkleRoot(bytes32 _merkleRoot) internal onlyOwner {
         merkleRoot = _merkleRoot;
+        emit MerkleRootUpdated(msg.sender, merkleRoot);
     }
 
     function isClaimed(uint256 index) public view override returns (bool) {

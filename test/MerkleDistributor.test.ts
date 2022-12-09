@@ -5,6 +5,7 @@ import { BigNumber, constants, Contract, ContractFactory } from 'ethers'
 import { ethers } from 'hardhat'
 import BalanceTree from '../src/balance-tree'
 import { parseBalanceMap } from '../src/parse-balance-map'
+import moment from 'moment'
 
 chai.use(solidity)
 
@@ -488,5 +489,100 @@ describe('#MerkleDistributorWithDeadline', () => {
     await ethers.provider.send('evm_mine', [oneSecondAfterEndTime])
     distributor = distributor.connect(wallet1)
     await expect(distributor.withdraw(overrides)).to.be.revertedWith('Ownable: caller is not the owner')
+  })
+})
+
+describe.only(`#MerkleDistributorWithDeadline next cycle`, () => {
+  let wallet0: SignerWithAddress
+  let wallet1: SignerWithAddress
+  let wallet2: SignerWithAddress
+  let wallets: SignerWithAddress[]
+
+  beforeEach(async () => {
+    wallets = await ethers.getSigners()
+    wallet0 = wallets[0]
+    wallet1 = wallets[1]
+    wallet2 = wallets[2]
+  })
+  const deploy = async (
+    timestamp: number,
+    transferBalance = 201,
+    balanceTree = [
+      { account: wallet0.address, amount: BigNumber.from(100) },
+      { account: wallet1.address, amount: BigNumber.from(101) },
+    ]
+  ) => {
+    let distributor: Contract
+    const tokenFactory = await ethers.getContractFactory('TestERC20', wallet0)
+    const token = await tokenFactory.deploy('Token', 'TKN', 0, overrides)
+    const tree = new BalanceTree(balanceTree)
+    const merkleDistributorWithDeadlineFactory = await ethers.getContractFactory(
+      'MerkleDistributorWithDeadline',
+      wallet0
+    )
+    // Set the endTime to be 1 year after currentTimestamp
+    distributor = await merkleDistributorWithDeadlineFactory.deploy(
+      token.address,
+      tree.getHexRoot(),
+      timestamp,
+      overrides
+    )
+    await token.setBalance(distributor.address, 201)
+
+    return {
+      token,
+      tree,
+      distributor,
+    }
+  }
+
+  it(`non owner should not be able to set next cycle`, async () => {
+    // Claiming window 20 minutes
+    const timestamp = moment().add(20, 'minutes')
+    const { distributor } = await deploy(timestamp.unix())
+
+    // try setting next claiming window for another 20 minutes
+    await expect(
+      distributor.connect(wallet1).setNextCycle(ZERO_BYTES32, timestamp.add(20, 'minutes').unix())
+    ).to.be.revertedWith('Ownable: caller is not the owner')
+  })
+
+  it(`describes next cycle workflow`, async () => {
+    const timestamp = moment().add(20, 'minutes')
+    const { distributor, tree } = await deploy(timestamp.unix(), 303)
+
+    const proof0 = tree.getProof(0, wallet0.address, BigNumber.from(100))
+    await expect(distributor.claim(0, wallet0.address, 100, proof0, overrides))
+      .to.emit(distributor, 'Claimed')
+      .withArgs(0, wallet0.address, 100)
+
+    // Construct new tree that includes addresses that havent claimed in the previous cycle + new one
+    const newTree = new BalanceTree([
+      { account: wallet0.address, amount: BigNumber.from(100) }, // NEW TREE MUST INCLUDE PREVIOUS VALUES
+      { account: wallet1.address, amount: BigNumber.from(101) },
+      { account: wallet2.address, amount: BigNumber.from(102) },
+    ])
+
+    // Set next 20 minutes claiming window
+    const newClaimingWindow = timestamp.add(20, 'minutes')
+
+    await expect(distributor.setNextCycle(newTree.getHexRoot(), newClaimingWindow.unix()))
+      .to.emit(distributor, 'MerkleRootUpdated')
+      .withArgs(wallet0.address, newTree.getHexRoot())
+      .to.emit(distributor, 'NextCycleStarted')
+      .withArgs(wallet0.address, newClaimingWindow.unix())
+
+    await expect(distributor.claim(0, wallet0.address, 100, proof0, overrides)).to.be.revertedWith('AlreadyClaimed()')
+
+    const proof1 = newTree.getProof(1, wallet1.address, BigNumber.from(101))
+    await expect(distributor.claim(1, wallet1.address, 101, proof1, overrides))
+      .to.emit(distributor, 'Claimed')
+      .withArgs(1, wallet1.address, BigNumber.from(101))
+
+    const oneSecondAfterEndTime = newClaimingWindow.add(1, 'second').unix()
+    await ethers.provider.send('evm_mine', [oneSecondAfterEndTime])
+
+    const proof2 = newTree.getProof(2, wallet2.address, BigNumber.from(102))
+    await expect(distributor.claim(2, wallet2.address, 102, proof2, overrides)).to.revertedWith('ClaimWindowFinished()')
   })
 })

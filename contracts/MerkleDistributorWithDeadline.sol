@@ -13,6 +13,8 @@ contract MerkleDistributorWithDeadline is MerkleDistributor {
 
     uint256 public endTime;
 
+    event NextCycleStarted(address startedBy, uint256 endsIn);
+
     constructor(address token_, bytes32 merkleRoot_, uint256 endTime_) MerkleDistributor(token_, merkleRoot_) {
         if (endTime_ <= block.timestamp) revert EndTimeInPast();
         endTime = endTime_;
@@ -23,6 +25,7 @@ contract MerkleDistributorWithDeadline is MerkleDistributor {
     function setNextCycle(bytes32 _merkleRoot, uint256 _endTime) public onlyOwner {
         super.setMerkleRoot(_merkleRoot);
         endTime = _endTime;
+        emit NextCycleStarted(msg.sender, endTime);
     }
 
     function claim(uint256 index, address account, uint256 amount, bytes32[] calldata merkleProof) public override {
